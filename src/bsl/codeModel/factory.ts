@@ -14,10 +14,13 @@ import {
     ModuleVariableDefinitionSymbol,
     ParameterDefinitionSymbol,
     ProcedureDefinitionSymbol,
-    PropertyAccessSymbol,
+    AccessSequenceSymbol,
     PropertySymbol,
     ReturnStatementSymbol,
-    VariableSymbol
+    TernaryExpressionSymbol,
+    VariableSymbol,
+    UnaryExpressionSymbol,
+    ExpressionSymbol
 } from "./model";
 import { BaseTypes } from "../scope/baseTypes";
 
@@ -30,7 +33,10 @@ export function createSymbol(node: Node): BaseSymbol | BaseSymbol[] | undefined 
     }
 }
 
-export function createExpressionSymbol(node: Node): BaseSymbol | undefined {
+export function createExpressionSymbol(node: Node | null): ExpressionSymbol | undefined {
+    if (!node) {
+        return undefined
+    }
     const constructor = expressionConstructors[node.type]
     if (constructor) {
         return constructor(node)
@@ -56,18 +62,18 @@ export function fillChildren(nodeChildren: (Node | null)[], symbolChildren: Base
 type CreatorType = (node: Node) => BaseSymbol | BaseSymbol[] | undefined
 type ConstructorsType = { [key: string]: CreatorType }
 
-const expressionConstructors: { [key: string]: (node: Node) => BaseSymbol | undefined } = {
+const expressionConstructors: { [key: string]: (node: Node) => ExpressionSymbol | undefined } = {
     [BslTokenTypes.const_expression]: createConstExpression,
     [BslTokenTypes.identifier]: n => new VariableSymbol(n, n.text),
-    [BslTokenTypes.unary_expression]: () => { throw 'not implemented' },
+    [BslTokenTypes.unary_expression]: createUnaryExpression,
     [BslTokenTypes.binary_expression]: createBinaryExpression,
-    [BslTokenTypes.ternary_expression]: () => { throw 'not implemented' },
+    [BslTokenTypes.ternary_expression]: createTernaryExpressionSymbol,
     [BslTokenTypes.new_expression]: createConstructor,
     [BslTokenTypes.new_expression_method]: createConstructorMethod,
     [BslTokenTypes.method_call]: createMethodCall,
-    [BslTokenTypes.call_expression]: () => { throw 'not implemented' },
-    [BslTokenTypes.property_access]: createPropertyAccess,
-    [BslTokenTypes.expression]: n => n.firstNamedChild ? createExpressionSymbol(n.firstNamedChild) : undefined,
+    [BslTokenTypes.call_expression]: createAccessSequence,
+    [BslTokenTypes.property_access]: createAccessSequence,
+    [BslTokenTypes.expression]: n => createExpressionSymbol(n.firstNamedChild),
     [BslTokenTypes.await_expression]: () => { throw 'not implemented' },
 }
 
@@ -97,7 +103,7 @@ const statementConstructors: ConstructorsType = {
     [BslTokenTypes.remove_handler_statement]: () => { throw 'not implemented' },
     [BslTokenTypes.preprocessor]: () => { throw 'not implemented' },
     [BslTokenTypes.await_statement]: () => { throw 'not implemented' },
-    [BslTokenTypes.property_access]: createPropertyAccess,
+    [BslTokenTypes.property_access]: createAccessSequence,
 }
 
 const constructors: ConstructorsType = {
@@ -149,7 +155,6 @@ function createParameter(node: Node) {
 function createAssignmentStatement(node: Node) {
     const symbol = new AssignmentStatementSymbol(node)
     const left = node.childForFieldName('left')
-    const right = node.childForFieldName('right')
     if (!left) {
         throw 'Не указана переменная для присвоения'
     }
@@ -158,13 +163,11 @@ function createAssignmentStatement(node: Node) {
             symbol.variable = createVariable(left)
             break
         case BslTokenTypes.property_access:
-            symbol.variable = createPropertyAccess(left)
+            symbol.variable = createAccessSequence(left)
             break
     }
 
-    if (right) {
-        symbol.expression = createExpressionSymbol(right)
-    }
+    symbol.expression = createExpressionSymbol(node.childForFieldName('right'))
 
     return symbol
 }
@@ -174,8 +177,8 @@ function createVariable(node: Node) {
     return symbol
 }
 
-function createPropertyAccess(node: Node) {
-    const symbol = new PropertyAccessSymbol(node)
+function createAccessSequence(node: Node) {
+    const symbol = new AccessSequenceSymbol(node)
     if (node.firstNamedChild) {
         symbol.access = collectAccessTokens(node)
     }
@@ -184,10 +187,8 @@ function createPropertyAccess(node: Node) {
 
 function createReturnStatement(node: Node) {
     const symbol = new ReturnStatementSymbol(node)
-    const resultNode = node.childForFieldName('result')
-    if (resultNode) {
-        symbol.expression = createExpressionSymbol(resultNode)
-    }
+    symbol.expression = createExpressionSymbol(node.childForFieldName('result'))
+
     return symbol
 }
 
@@ -236,17 +237,31 @@ function createAccessSymbol(node: Node) {
 
 function createBinaryExpression(node: Node) {
     const symbol = new BinaryExpressionSymbol(node)
-    const leftNode = node.childForFieldName('left')
-    const rightNode = node.childForFieldName('right')
 
-    if (leftNode) {
-        symbol.left = createExpressionSymbol(leftNode) as BaseSymbol
-    }
+    symbol.left = createExpressionSymbol(node.childForFieldName('left'))
+    symbol.right = createExpressionSymbol(node.childForFieldName('right'))
 
-    if (rightNode) {
-        symbol.right = createExpressionSymbol(rightNode) as BaseSymbol
-    }
     symbol.operator = node.childForFieldName('operator')?.text
+
+    return symbol
+}
+
+function createUnaryExpression(node: Node) {
+    const symbol = new UnaryExpressionSymbol(node)
+
+    symbol.operand = createExpressionSymbol(node.childForFieldName('argument'))
+    symbol.operator = node.childForFieldName('operator')?.text
+
+    return symbol
+
+}
+
+function createTernaryExpressionSymbol(node: Node) {
+    const symbol = new TernaryExpressionSymbol(node)
+
+    symbol.condition = createExpressionSymbol(node.childForFieldName('condition'))
+    symbol.consequence = createExpressionSymbol(node.childForFieldName('consequence'))
+    symbol.alternative = createExpressionSymbol(node.childForFieldName('alternative'))
 
     return symbol
 }
@@ -276,17 +291,11 @@ function createConstructor(node: Node) {
 
 function createConstructorMethod(node: Node) {
     const symbol = new ConstructorSymbol(node)
-    const typeNode = node.childForFieldName('type')
-    const argsNode = node.childForFieldName('arguments')
+    symbol.name = createExpressionSymbol(node.childForFieldName('type'))
+    symbol.arguments = createExpressionSymbol(node.childForFieldName('arguments'))
 
-    if (typeNode) {
-        symbol.name = createExpressionSymbol(typeNode)
-        if (symbol.name instanceof ConstSymbol && symbol.name.type === BaseTypes.string) {
-            symbol.name = symbol.name.value
-        }
-    }
-    if (argsNode) {
-        symbol.arguments = createExpressionSymbol(argsNode)
+    if (symbol.name instanceof ConstSymbol && symbol.name.type === BaseTypes.string) {
+        symbol.name = symbol.name.value
     }
 
     return symbol
@@ -326,6 +335,6 @@ function collectArguments(node: Node | null) {
         return undefined
     }
     return node.namedChildren
-        .map(n => n ? createExpressionSymbol(n) : undefined)
+        .map(createExpressionSymbol)
         .map(n => n as BaseSymbol)
 }
